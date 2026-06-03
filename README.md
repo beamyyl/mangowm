@@ -1,3 +1,4 @@
+# This fork was made to include a 'mango.nix' file which can be used to install MangoWC on NixOS systems without *FLAKES* hehe
 <div align="center">
   <img src="https://github.com/mangowm/mango/blob/main/assets/mango-transparency-256.png" alt="Mango Logo" width="120"/>
 
