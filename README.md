@@ -10,6 +10,13 @@
 services.displayManager.sessionPackages = [ (pkgs.callPackage /home/beamy/mangowm/mango.nix {}) ];
 ```
 3. Run `nixos-rebuild switch` and thats it
+# To update:
+Run this in the cloned folder:
+```bash
+git fetch origin main && git reset --hard origin/main
+```
+Then just `nixos-rebuild switch`
+
 ### Now, here comes the real readme.md from mangowm's git:
 
 <div align="center">
