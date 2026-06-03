@@ -1,4 +1,16 @@
-# This fork was made to include a 'mango.nix' file which can be used to install MangoWC on NixOS systems without *FLAKES* hehe
+# This fork was made to include a 'mango.nix' file which can be used to install MangoWC on NixOS systems without *FLAKES* hehe. To actually use it, follow these steps:
+# THE Steps:
+1. Open `configuration.nix` and add the following line to your `systemPackages`:
+```bash
+(pkgs.callPackage /home/beamy/mangowm/mango.nix {})
+```
+2. Add this to the bottom:
+```bash
+services.displayManager.sessionPackages = [ (pkgs.callPackage /home/beamy/mangowm/mango.nix {}) ];
+```
+3. Run `nixos-rebuild switch` and thats it
+Now, here comes the real readme.md from mangowm's git:
+
 <div align="center">
   <img src="https://github.com/mangowm/mango/blob/main/assets/mango-transparency-256.png" alt="Mango Logo" width="120"/>
 
