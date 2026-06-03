@@ -1,5 +1,6 @@
 # This fork was made to include a 'mango.nix' file which can be used to install MangoWC on NixOS systems without *FLAKES* hehe. To actually use it, follow these steps:
 # THE Steps:
+0.9. Replace the path from the commands bellow with the path of where you cloned this repo.
 1. Open `configuration.nix` and add the following line to your `systemPackages`:
 ```bash
 (pkgs.callPackage /home/beamy/mangowm/mango.nix {})
