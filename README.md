@@ -9,7 +9,7 @@
 services.displayManager.sessionPackages = [ (pkgs.callPackage /home/beamy/mangowm/mango.nix {}) ];
 ```
 3. Run `nixos-rebuild switch` and thats it
-Now, here comes the real readme.md from mangowm's git:
+### Now, here comes the real readme.md from mangowm's git:
 
 <div align="center">
   <img src="https://github.com/mangowm/mango/blob/main/assets/mango-transparency-256.png" alt="Mango Logo" width="120"/>
