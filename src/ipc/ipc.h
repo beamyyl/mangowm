@@ -164,6 +164,8 @@ static cJSON *build_client_json(Client *c) {
 	cJSON_AddNumberToObject(obj, "y", c->geom.y);
 	cJSON_AddNumberToObject(obj, "width", c->geom.width);
 	cJSON_AddNumberToObject(obj, "height", c->geom.height);
+	cJSON_AddNumberToObject(obj, "scroller_proportion",
+							(double)c->scroller_proportion);
 	return obj;
 }
 
@@ -235,6 +237,15 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 	if (strcmp(cmd, "get version") == 0) {
 		resp = cJSON_CreateObject();
 		cJSON_AddStringToObject(resp, "version", VERSION);
+	} else if (strcmp(cmd, "get cursorpos") == 0) {
+		resp = cJSON_CreateObject();
+		cJSON_AddNumberToObject(resp, "x", cursor->x);
+		cJSON_AddNumberToObject(resp, "y", cursor->y);
+		Monitor *m = xytomon(cursor->x, cursor->y);
+		if (m)
+			cJSON_AddStringToObject(resp, "monitor", m->wlr_output->name);
+		else
+			cJSON_AddNullToObject(resp, "monitor");
 	} else if (strcmp(cmd, "get keymode") == 0) {
 		resp = cJSON_CreateObject();
 		cJSON_AddStringToObject(resp, "keymode", keymode.mode);

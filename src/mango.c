@@ -96,10 +96,11 @@
 #include <xcb/xcb_icccm.h>
 #endif
 #include "common/util.h"
+#include "draw/text-node.h"
 
 /* macros */
-#define MAX(A, B) ((A) > (B) ? (A) : (B))
-#define MIN(A, B) ((A) < (B) ? (A) : (B))
+#define MANGO_MAX(A, B) ((A) > (B) ? (A) : (B))
+#define MANGO_MIN(A, B) ((A) < (B) ? (A) : (B))
 #define GEZERO(A) ((A) >= 0 ? (A) : 0)
 #define CLEANMASK(mask) (mask & ~WLR_MODIFIER_CAPS)
 #define INSIDEMON(A)                                                           \
@@ -168,6 +169,7 @@ enum {
 	LyrBg,
 	LyrBlur,
 	LyrBottom,
+	LyrDecorate,
 	LyrTile,
 	LyrTop,
 	LyrFadeOut,
@@ -176,6 +178,9 @@ enum {
 	LyrBlock,
 	NUM_LAYERS
 }; /* scene layers */
+
+enum mango_node_type { MANGO_TITLE_NODE, MANGO_jump_label_node };
+
 #ifdef XWAYLAND
 enum {
 	NetWMWindowTypeDialog,
@@ -243,6 +248,11 @@ typedef struct {
 } Arg;
 
 typedef struct {
+	enum mango_node_type type;
+	void *node_data;
+} MangoNodeData;
+
+typedef struct {
 	uint32_t mod;
 	uint32_t button;
 	int32_t (*func)(const Arg *);
@@ -265,8 +275,8 @@ typedef struct {
 	struct wl_list link;
 	struct wlr_input_device *wlr_device;
 	struct libinput_device *libinput_device;
-	struct wl_listener destroy_listener; // 用于监听设备销毁事件
-	void *device_data;					 // 新增：指向设备特定数据（如 Switch）
+	struct wl_listener destroy_listener;
+	void *device_data;
 } InputDevice;
 
 typedef struct {
@@ -327,6 +337,8 @@ struct Client {
 	struct wlr_scene_shadow *shadow;
 	struct wlr_scene_tree *scene_surface;
 	struct wlr_scene_tree *overview_scene_surface;
+	struct mango_jump_label_node *jump_label_node;
+	struct mango_tab_bar_node *tab_bar_node;
 	struct wl_list link;
 	struct wl_list flink;
 	struct wl_list fadeout_link;
@@ -381,6 +393,8 @@ struct Client {
 	int32_t is_in_scratchpad;
 	int32_t iscustomsize;
 	int32_t iscustompos;
+	int32_t iscustom_scroller_proportion;
+	int32_t iscustom_scroller_proportion_single;
 	int32_t is_scratchpad_show;
 	int32_t isglobal;
 	int32_t isnoborder;
@@ -392,6 +406,7 @@ struct Client {
 	int32_t iskilling;
 	int32_t istagswitching;
 	int32_t isnamedscratchpad;
+	bool is_monocle_hide;
 	bool is_pending_open_animation;
 	bool is_restoring_from_ov;
 	float scroller_proportion;
@@ -431,6 +446,7 @@ struct Client {
 	int32_t allow_shortcuts_inhibit;
 	float scroller_proportion_single;
 	bool isfocusing;
+	char jump_char;
 	bool enable_drop_area_draw;
 	int32_t drop_direction;
 	struct wlr_box drag_tile_float_backup_geom;
@@ -552,6 +568,7 @@ struct Monitor {
 	uint32_t ovbk_prev_tagset;
 	Client *sel, *prevsel;
 	int32_t isoverview;
+	int32_t is_jump_mode;
 	int32_t is_in_hotarea;
 	int32_t asleep;
 	uint32_t visible_clients;
@@ -735,8 +752,9 @@ static void run(char *startup_cmd);
 static void setcursor(struct wl_listener *listener, void *data);
 static void setfloating(Client *c, int32_t floating);
 static void setfakefullscreen(Client *c, int32_t fakefullscreen);
-static void setfullscreen(Client *c, int32_t fullscreen);
-static void setmaximizescreen(Client *c, int32_t maximizescreen);
+static void setfullscreen(Client *c, int32_t fullscreen, bool rearrange);
+static void setmaximizescreen(Client *c, int32_t maximizescreen,
+							  bool rearrange);
 static void reset_maximizescreen_size(Client *c);
 static void setgaps(int32_t oh, int32_t ov, int32_t ih, int32_t iv);
 
@@ -834,6 +852,7 @@ static struct wlr_scene_tree *
 wlr_scene_tree_snapshot(struct wlr_scene_node *node,
 						struct wlr_scene_tree *parent);
 static bool is_scroller_layout(Monitor *m);
+static bool is_monocle_layout(Monitor *m);
 static bool is_centertile_layout(Monitor *m);
 static void create_output(struct wlr_backend *backend, void *data);
 static void get_layout_abbr(char *abbr, const char *full_name);
@@ -855,7 +874,7 @@ static float *get_border_color(Client *c);
 static void clear_fullscreen_and_maximized_state(Monitor *m);
 static void request_fresh_all_monitors(void);
 static Client *find_client_by_direction(Client *tc, const Arg *arg,
-										bool findfloating, bool ignore_align);
+										bool findfloating);
 static void exit_scroller_stack(Client *c);
 static Client *scroll_get_stack_head_client(Client *c);
 static bool client_only_in_one_tag(Client *c);
@@ -895,6 +914,10 @@ static void update_scroller_state(Monitor *m);
 Client *scroll_get_stack_tail_client(Client *c);
 static DwindleNode *dwindle_find_leaf(DwindleNode *node, Client *c);
 static void overview_backup_surface(Client *c);
+
+static void create_jump_hints(Monitor *m);
+static void finish_jump_mode(Monitor *m);
+static void begin_jump_mode(Monitor *m);
 
 #include "data/static_keymap.h"
 #include "dispatch/bind_declare.h"
@@ -1026,6 +1049,9 @@ struct Pertag {
 	int32_t no_hide[LENGTH(tags) + 1];
 	int32_t no_render_border[LENGTH(tags) + 1];
 	int32_t open_as_floating[LENGTH(tags) + 1];
+	float scroller_default_proportion[LENGTH(tags) + 1];
+	float scroller_default_proportion_single[LENGTH(tags) + 1];
+	int32_t scroller_ignore_proportion_single[LENGTH(tags) + 1];
 	struct DwindleNode *dwindle_root[LENGTH(tags) + 1];
 	const Layout *ltidxs[LENGTH(tags) + 1];
 	struct TagScrollerState *scroller_state[LENGTH(tags) + 1];
@@ -1116,8 +1142,8 @@ void client_change_mon(Client *c, Monitor *m) {
 
 void applybounds(Client *c, struct wlr_box *bbox) {
 	/* set minimum possible */
-	c->geom.width = MAX(1 + 2 * (int32_t)c->bw, c->geom.width);
-	c->geom.height = MAX(1 + 2 * (int32_t)c->bw, c->geom.height);
+	c->geom.width = MANGO_MAX(1 + 2 * (int32_t)c->bw, c->geom.width);
+	c->geom.height = MANGO_MAX(1 + 2 * (int32_t)c->bw, c->geom.height);
 
 	if (c->geom.x >= bbox->x + bbox->width)
 		c->geom.x = bbox->x + bbox->width - c->geom.width;
@@ -1150,11 +1176,11 @@ void clear_fullscreen_flag(Client *c) {
 	}
 
 	if (c->isfullscreen) {
-		setfullscreen(c, false);
+		setfullscreen(c, false, true);
 	}
 
 	if (c->ismaximizescreen) {
-		setmaximizescreen(c, 0);
+		setmaximizescreen(c, 0, true);
 	}
 }
 
@@ -1246,6 +1272,10 @@ void swallow(Client *c, Client *w) {
 
 	if (c->mon && c->mon->isoverview && config.ov_no_resize) {
 		overview_backup_surface(c);
+	}
+
+	if (w->tab_bar_node) {
+		wlr_scene_node_set_enabled(&w->tab_bar_node->scene_buffer->node, false);
 	}
 
 	/* 全局链表替换 */
@@ -1542,7 +1572,7 @@ void set_float_malposition(Client *tc) {
 	y = tc->geom.y;
 	xreverse = 1;
 	yreverse = 1;
-	offset = MIN(tc->mon->w.width / 20, tc->mon->w.height / 20);
+	offset = MANGO_MIN(tc->mon->w.width / 20, tc->mon->w.height / 20);
 
 	wl_list_for_each(c, &clients, link) {
 		if (c->isfloating && c != tc && VISIBLEON(c, tc->mon) &&
@@ -1654,6 +1684,14 @@ void applyrules(Client *c) {
 			c->isfloating = 1;
 		}
 
+		if (r->scroller_proportion > 0.0f) {
+			c->iscustom_scroller_proportion = 1;
+		}
+
+		if (r->scroller_proportion_single > 0.0f) {
+			c->iscustom_scroller_proportion_single = 1;
+		}
+
 		// set geometry of floating client
 
 		if (r->width > 1)
@@ -1690,9 +1728,11 @@ void applyrules(Client *c) {
 	// the hit size
 	if (!c->iscustompos &&
 		(!client_is_x11(c) || (c->geom.x == 0 && c->geom.y == 0))) {
+		struct wlr_box pending_center_geom =
+			c->iscustomsize ? c->float_geom : c->geom;
 		c->float_geom = c->geom =
-			setclient_coordinate_center(c, mon, c->geom, 0, 0);
-	} else {
+			setclient_coordinate_center(c, mon, pending_center_geom, 0, 0);
+	} else if (!c->iscustomsize) {
 		c->float_geom = c->geom;
 	}
 
@@ -1748,7 +1788,7 @@ void applyrules(Client *c) {
 		view_in_mon(&(Arg){.ui = c->tags}, true, c->mon, true);
 	}
 
-	setfullscreen(c, fullscreen_state_backup);
+	setfullscreen(c, fullscreen_state_backup, true);
 
 	if (c->isfakefullscreen) {
 		setfakefullscreen(c, 1);
@@ -2202,9 +2242,10 @@ void hold_end(struct wl_listener *listener, void *data) {
 Client *find_closest_tiled_client(Client *c) {
 	Client *tc, *closest = NULL;
 	long min_dist = LONG_MAX;
+	Monitor *cursor_mon = xytomon(cursor->x, cursor->y);
 
 	wl_list_for_each(tc, &clients, link) {
-		if (tc == c || !ISTILED(tc) || !VISIBLEON(tc, c->mon))
+		if (tc == c || !ISTILED(tc) || !VISIBLEON(tc, cursor_mon))
 			continue;
 
 		if (cursor->x >= tc->geom.x &&
@@ -2236,7 +2277,9 @@ void place_drag_tile_client(Client *c) {
 
 		if (closest->drop_direction == UNDIR) {
 			setfloating(c, 0);
-			exchange_two_client(c, closest);
+			wl_list_remove(&c->link);
+			wl_list_insert(closest->link.prev, &c->link);
+			arrange(closest->mon, false, false);
 			return;
 		}
 
@@ -2335,6 +2378,28 @@ bool handle_buttonpress(struct wlr_pointer_button_event *event) {
 			}
 		}
 
+		// overview模式下鼠标左键跳转，右键关闭窗口
+		if (selmon && selmon->isoverview && event->button == BTN_LEFT && c) {
+			toggleoverview(&(Arg){.i = 1});
+			return true;
+		}
+
+		if (selmon && selmon->isoverview && event->button == BTN_RIGHT && c) {
+			pending_kill_client(c);
+			return true;
+		}
+
+		// handle click on tile node
+		struct wlr_scene_node *node = wlr_scene_node_at(
+			&layers[LyrDecorate]->node, cursor->x, cursor->y, NULL, NULL);
+		if (node && node->data) {
+			MangoNodeData *mangonodedata = (MangoNodeData *)node->data;
+			if (mangonodedata->type == MANGO_TITLE_NODE) {
+				Client *c = mangonodedata->node_data;
+				focusclient(c, 1);
+			}
+		}
+
 		// 当鼠标焦点在layer上的时候，不检测虚拟键盘的mod状态，
 		// 避免layer虚拟键盘锁死mod按键状态
 		hard_keyboard = &kb_group->wlr_group->keyboard;
@@ -2350,16 +2415,6 @@ bool handle_buttonpress(struct wlr_pointer_button_event *event) {
 			if (config.mouse_bindings_count < 1)
 				break;
 			m = &config.mouse_bindings[ji];
-
-			if (selmon->isoverview && event->button == BTN_LEFT && c) {
-				toggleoverview(&(Arg){.i = 1});
-				return true;
-			}
-
-			if (selmon->isoverview && event->button == BTN_RIGHT && c) {
-				pending_kill_client(c);
-				return true;
-			}
 
 			if (CLEANMASK(mods) == CLEANMASK(m->mod) &&
 				event->button == m->button && m->func &&
@@ -2517,6 +2572,8 @@ void cleanuplisteners(void) {
 }
 
 void cleanup(void) {
+	allow_frame_scheduling = false;
+
 	ipc_cleanup();
 	cleanuplisteners();
 #ifdef XWAYLAND
@@ -2543,6 +2600,8 @@ void cleanup(void) {
 	/* Destroy after the wayland display (when the monitors are already
 	   destroyed) to avoid destroying them with an invalid scene output. */
 	wlr_scene_node_destroy(&scene->tree.node);
+
+	mango_text_global_finish();
 }
 
 void cleanupmon(struct wl_listener *listener, void *data) {
@@ -3829,16 +3888,16 @@ void focusclient(Client *c, int32_t lift) {
 
 		// decide whether need to re-arrange
 
-		if (c && selmon->prevsel &&
-			(selmon->prevsel->tags & selmon->tagset[selmon->seltags]) &&
-			(c->tags & selmon->tagset[selmon->seltags]) && !c->isfloating &&
-			is_scroller_layout(selmon)) {
-			arrange(selmon, false, false);
-		}
-
 		// change focus link position
 		wl_list_remove(&c->flink);
 		wl_list_insert(&fstack, &c->flink);
+
+		if (c && selmon->prevsel &&
+			(selmon->prevsel->tags & selmon->tagset[selmon->seltags]) &&
+			(c->tags & selmon->tagset[selmon->seltags]) && !c->isfloating &&
+			(is_scroller_layout(selmon) || is_monocle_layout(selmon))) {
+			arrange(selmon, false, false);
+		}
 
 		// change border color
 		c->isurgent = 0;
@@ -3939,7 +3998,7 @@ fullscreennotify(struct wl_listener *listener, void *data) {
 	if (!c || c->iskilling)
 		return;
 
-	setfullscreen(c, client_wants_fullscreen(c));
+	setfullscreen(c, client_wants_fullscreen(c), true);
 }
 
 void requestmonstate(struct wl_listener *listener, void *data) {
@@ -4195,8 +4254,8 @@ void keypress(struct wl_listener *listener, void *data) {
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 	// ov tab mode detect moe key release
-	if (config.ov_tab_mode && !locked && group == kb_group &&
-		event->state == WL_KEYBOARD_KEY_STATE_RELEASED &&
+	if (config.ov_tab_mode && !selmon->is_jump_mode && !locked &&
+		group == kb_group && event->state == WL_KEYBOARD_KEY_STATE_RELEASED &&
 		(keycode == 133 || keycode == 37 || keycode == 64 || keycode == 50 ||
 		 keycode == 134 || keycode == 105 || keycode == 108 || keycode == 62) &&
 		selmon && selmon->sel) {
@@ -4235,6 +4294,27 @@ void keypress(struct wl_listener *listener, void *data) {
 
 	if (handled)
 		return;
+
+	if (selmon && selmon->is_jump_mode &&
+		event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		for (i = 0; i < nsyms; i++) {
+			xkb_keysym_t sym = xkb_keysym_to_lower(syms[i]);
+			if (sym >= XKB_KEY_a && sym <= XKB_KEY_z) {
+				char c_char = 'A' + (sym - XKB_KEY_a);
+				Client *c;
+				wl_list_for_each(c, &clients, link) {
+					if (c->mon == selmon && c->jump_char == c_char) {
+						focusclient(c, 1);
+						toggleoverview(&(Arg){.i = 1});
+						return;
+					}
+				}
+			} else if (sym == XKB_KEY_Escape) {
+				togglejump(&(Arg){.i = 0});
+				return;
+			}
+		}
+	}
 
 	/* don't pass when popup is focused
 	 * this is better than having popups (like fuzzel or wmenu) closing
@@ -4345,6 +4425,9 @@ static void iter_xdg_scene_buffers(struct wlr_scene_buffer *buffer, int32_t sx,
 void init_client_properties(Client *c) {
 	c->grid_col_per = 1.0f;
 	c->grid_row_per = 1.0f;
+	c->is_monocle_hide = false;
+	c->jump_label_node = NULL;
+	c->tab_bar_node = NULL;
 	c->overview_scene_surface = NULL;
 	c->drop_direction = UNDIR;
 	c->enable_drop_area_draw = false;
@@ -4403,6 +4486,8 @@ void init_client_properties(Client *c) {
 	c->ignore_minimize = 1;
 	c->iscustomsize = 0;
 	c->iscustompos = 0;
+	c->iscustom_scroller_proportion = 0;
+	c->iscustom_scroller_proportion_single = 0;
 	c->master_mfact_per = 0.0f;
 	c->master_inner_per = 0.0f;
 	c->stack_inner_per = 0.0f;
@@ -4582,9 +4667,9 @@ void maximizenotify(struct wl_listener *listener, void *data) {
 	}
 
 	if (client_request_maximize(c, data)) {
-		setmaximizescreen(c, 1);
+		setmaximizescreen(c, 1, true);
 	} else {
-		setmaximizescreen(c, 0);
+		setmaximizescreen(c, 0, true);
 	}
 }
 
@@ -4812,7 +4897,8 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
 	if (!surface && !seat->drag && !cursor_hidden)
 		wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
 
-	if (c && c->mon && !c->animation.running && (INSIDEMON(c) || !ISTILED(c))) {
+	if (c && c->mon && !c->animation.running &&
+		(INSIDEMON(c) || !ISSCROLLTILED(c))) {
 		scroller_focus_lock = 0;
 	}
 
@@ -4824,13 +4910,15 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
 	}
 
 	if (!scroller_focus_lock || !(c && c->mon && !INSIDEMON(c))) {
-		if (c && c->mon && is_scroller_layout(c->mon) && !INSIDEMON(c)) {
+		if (c && c->mon && ISSCROLLTILED(c) && is_scroller_layout(c->mon) &&
+			!INSIDEMON(c)) {
 			should_lock = true;
 		}
 
 		if (!((!config.edge_scroller_pointer_focus ||
 			   speed < config.edge_scroller_focus_allow_speed) &&
-			  c && c->mon && is_scroller_layout(c->mon) && !INSIDEMON(c))) {
+			  c && c->mon && ISSCROLLTILED(c) && is_scroller_layout(c->mon) &&
+			  !INSIDEMON(c))) {
 			pointerfocus(c, surface, sx, sy, time);
 		}
 
@@ -5446,7 +5534,7 @@ void exit_scroller_stack(Client *c) {
 	}
 }
 
-void setmaximizescreen(Client *c, int32_t maximizescreen) {
+void setmaximizescreen(Client *c, int32_t maximizescreen, bool rearrange) {
 	struct wlr_box maximizescreen_box;
 	if (!c || !c->mon || !client_surface(c)->mapped || c->iskilling)
 		return;
@@ -5487,7 +5575,8 @@ void setmaximizescreen(Client *c, int32_t maximizescreen) {
 		client_set_maximized(c, true);
 	}
 
-	arrange(c->mon, false, false);
+	if (rearrange)
+		arrange(c->mon, false, false);
 }
 
 void setfakefullscreen(Client *c, int32_t fakefullscreen) {
@@ -5496,12 +5585,13 @@ void setfakefullscreen(Client *c, int32_t fakefullscreen) {
 		return;
 
 	if (c->isfullscreen)
-		setfullscreen(c, 0);
+		setfullscreen(c, 0, true);
 
 	client_set_fullscreen(c, fakefullscreen);
 }
 
-void setfullscreen(Client *c, int32_t fullscreen) // 用自定义全屏代理自带全屏
+void setfullscreen(Client *c, int32_t fullscreen,
+				   bool rearrange) // 用自定义全屏代理自带全屏
 {
 
 	if (!c || !c->mon || !client_surface(c)->mapped || c->iskilling)
@@ -5547,14 +5637,15 @@ void setfullscreen(Client *c, int32_t fullscreen) // 用自定义全屏代理自
 			layers[fullscreen || c->isfloating ? LyrTop : LyrTile]);
 	}
 
-	arrange(c->mon, false, false);
+	if (rearrange)
+		arrange(c->mon, false, false);
 }
 
 void setgaps(int32_t oh, int32_t ov, int32_t ih, int32_t iv) {
-	selmon->gappoh = MAX(oh, 0);
-	selmon->gappov = MAX(ov, 0);
-	selmon->gappih = MAX(ih, 0);
-	selmon->gappiv = MAX(iv, 0);
+	selmon->gappoh = MANGO_MAX(oh, 0);
+	selmon->gappov = MANGO_MAX(ov, 0);
+	selmon->gappih = MANGO_MAX(ih, 0);
+	selmon->gappiv = MANGO_MAX(iv, 0);
 	arrange(selmon, false, false);
 }
 
@@ -5676,7 +5767,8 @@ void setmon(Client *c, Monitor *m, uint32_t newtags, bool focus) {
 		client_reset_mon_tags(c, m, newtags);
 		check_match_tag_floating_rule(c, m);
 		setfloating(c, c->isfloating);
-		setfullscreen(c, c->isfullscreen); /* This will call arrange(c->mon) */
+		setfullscreen(c, c->isfullscreen,
+					  true); /* This will call arrange(c->mon) */
 	}
 
 	if (focus && !client_is_x11_popup(c)) {
@@ -6268,13 +6360,13 @@ void overview_restore(Client *c, const Arg *arg) {
 		resize(c, c->overview_backup_geom, 0);
 	} else if (c->isfullscreen || c->ismaximizescreen) {
 		if (want_restore_fullscreen(c) && c->ismaximizescreen) {
-			setmaximizescreen(c, 1);
+			setmaximizescreen(c, 1, false);
 		} else if (want_restore_fullscreen(c) && c->isfullscreen) {
-			setfullscreen(c, 1);
+			setfullscreen(c, 1, false);
 		} else {
 			client_pending_fullscreen_state(c, 0);
 			client_pending_maximized_state(c, 0);
-			setfullscreen(c, false);
+			setfullscreen(c, false, false);
 		}
 	} else {
 		if (c->is_restoring_from_ov) {
@@ -6470,8 +6562,8 @@ void unmapnotify(struct wl_listener *listener, void *data) {
 	}
 
 	if (c->swallowedby) {
-		setmaximizescreen(c->swallowedby, c->ismaximizescreen);
-		setfullscreen(c->swallowedby, c->isfullscreen);
+		setmaximizescreen(c->swallowedby, c->ismaximizescreen, true);
+		setfullscreen(c->swallowedby, c->isfullscreen, true);
 		c->swallowedby->swallowing = NULL;
 		c->swallowedby = NULL;
 	}
@@ -6482,6 +6574,15 @@ void unmapnotify(struct wl_listener *listener, void *data) {
 	}
 
 	c->stack_proportion = 0.0f;
+
+	if (c->jump_label_node) {
+		mango_jump_label_node_destroy(c->jump_label_node);
+		c->jump_label_node = NULL;
+	}
+	if (c->tab_bar_node) {
+		mango_tab_bar_node_destroy(c->tab_bar_node);
+		c->tab_bar_node = NULL;
+	}
 
 	wlr_scene_node_destroy(&c->scene->node);
 	printstatus(IPC_WATCH_ARRANGGE);
@@ -6635,6 +6736,7 @@ void updatetitle(struct wl_listener *listener, void *data) {
 
 	const char *title;
 	title = client_get_title(c);
+	mango_tab_bar_node_update(c->tab_bar_node, title, 1.0);
 	if (title && c->foreign_toplevel)
 		wlr_foreign_toplevel_handle_v1_set_title(c->foreign_toplevel, title);
 	if (c == focustop(c->mon))
