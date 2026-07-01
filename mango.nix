@@ -1,4 +1,4 @@
-{ lib, stdenv, meson, ninja, pkg-config, wayland-protocols, wayland-scanner, libxkbcommon, wayland, pixman, libxcb, pcre2, libxcb-wm, libx11, wlroots_0_19, scenefx, libinput, mesa, seatd, cjson, libdrm, libdisplay-info, libliftoff, xwayland, libGL }:
+{ lib, stdenv, meson, ninja, pkg-config, wayland-protocols, wayland-scanner, libxkbcommon, wayland, pixman, libxcb, pcre2, libxcb-wm, libx11, wlroots_0_19, scenefx, libinput, mesa, seatd, cjson, libdrm, libdisplay-info, libliftoff, xwayland, libGL, pango, cairo }:
 
 stdenv.mkDerivation rec {
   pname = "mango";
@@ -32,6 +32,8 @@ stdenv.mkDerivation rec {
     libliftoff
     xwayland
     libGL
+    pango
+    cairo
   ];
 
   passthru.providedSessions = [ "mango" ];
