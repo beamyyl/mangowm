@@ -42,7 +42,7 @@ typedef struct {
 typedef struct {
 	uint32_t mod;
 	KeySymCode keysymcode;
-	int32_t (*func)(const Arg *);
+	void (*func)(const Arg *);
 	Arg arg;
 	char mode[28];
 	bool iscommonmode;
@@ -142,20 +142,20 @@ KeyBinding default_key_bindings[] = {CHVT(1), CHVT(2),	CHVT(3),  CHVT(4),
 typedef struct {
 	uint32_t mod;
 	uint32_t button;
-	int32_t (*func)(const Arg *);
+	void (*func)(const Arg *);
 	Arg arg;
 } MouseBinding;
 
 typedef struct {
 	uint32_t mod;
 	uint32_t dir;
-	int32_t (*func)(const Arg *);
+	void (*func)(const Arg *);
 	Arg arg;
 } AxisBinding;
 
 typedef struct {
 	uint32_t fold;
-	int32_t (*func)(const Arg *);
+	void (*func)(const Arg *);
 	Arg arg;
 } SwitchBinding;
 
@@ -163,7 +163,7 @@ typedef struct {
 	uint32_t mod;
 	uint32_t motion;
 	uint32_t fingers_count;
-	int32_t (*func)(const Arg *);
+	void (*func)(const Arg *);
 	Arg arg;
 } GestureBinding;
 
@@ -425,7 +425,7 @@ typedef struct {
 	int32_t hdr_depth;
 } Config;
 
-typedef int32_t (*FuncType)(const Arg *);
+typedef void (*FuncType)(const Arg *);
 Config config;
 
 bool parse_config_file(Config *config, const char *file_path, bool must_exist);
@@ -1028,6 +1028,9 @@ FuncType parse_func_name(char *func_name, Arg *arg, char *arg_value,
 	} else if (strcmp(func_name, "focusdir") == 0) {
 		func = focusdir;
 		(*arg).i = parse_direction(arg_value);
+	} else if (strcmp(func_name, "focus_window_or_workspace") == 0) {
+		func = focus_window_or_workspace;
+		(*arg).i = parse_direction(arg_value);
 	} else if (strcmp(func_name, "groupjoin") == 0) {
 		func = groupjoin;
 		(*arg).i = parse_direction(arg_value);
@@ -1154,6 +1157,7 @@ FuncType parse_func_name(char *func_name, Arg *arg, char *arg_value,
 		func = minimized;
 	} else if (strcmp(func_name, "restore_minimized") == 0) {
 		func = restore_minimized;
+		(*arg).i = atoi(arg_value);
 	} else if (strcmp(func_name, "toggle_scratchpad") == 0) {
 		func = toggle_scratchpad;
 	} else if (strcmp(func_name, "toggle_render_border") == 0) {
@@ -3757,7 +3761,7 @@ void set_value_default() {
 	config.no_border_when_single = 0;
 	config.no_radius_when_single = 0;
 	config.snap_distance = 30;
-	config.drag_tile_to_tile = 0;
+	config.drag_tile_to_tile = 1;
 	config.drag_tile_small = 1;
 	config.enable_floating_snap = 0;
 	config.swipe_min_threshold = 1;
@@ -4109,6 +4113,8 @@ void reapply_monitor_rules(void) {
 
 		if (m->hdr_enable) {
 			output_state_setup_hdr(m, false, &m->pending);
+		} else {
+			output_enable_hdr(m, &m->pending, false, false);
 		}
 
 		if (!(mango_scene_output_commit(m->scene_output, &m->pending))) {
@@ -4362,9 +4368,9 @@ void reset_option(void) {
 	arrange(selmon, false, false);
 }
 
-int32_t reload_config(const Arg *arg) {
+void reload_config(const Arg *arg) {
 	parse_config();
 	reset_option();
 	printstatus(IPC_WATCH_ARRANGGE);
-	return 1;
+	return;
 }

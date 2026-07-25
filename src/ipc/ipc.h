@@ -150,6 +150,7 @@ static cJSON *build_client_json(Client *c) {
 	cJSON_AddStringToObject(obj, "monitor",
 							c->mon ? c->mon->wlr_output->name : "");
 	cJSON_AddItemToObject(obj, "tags", tags_mask_to_array(c->tags));
+	cJSON_AddBoolToObject(obj, "is_xwayland", c->type == X11 ? true : false);
 	cJSON_AddBoolToObject(obj, "is_swallowing", c->swallowing ? true : false);
 	cJSON_AddBoolToObject(obj, "is_swallowedby", c->swallowdby ? true : false);
 	cJSON_AddBoolToObject(obj, "is_group", c->group_prev || c->group_next);
@@ -179,6 +180,8 @@ static cJSON *build_monitor_json(Monitor *m) {
 	cJSON *resp = cJSON_CreateObject();
 	cJSON_AddStringToObject(resp, "name", m->wlr_output->name);
 	cJSON_AddBoolToObject(resp, "active", m == selmon);
+	cJSON_AddBoolToObject(resp, "is_hdr", m->is_hdr_enabling);
+	cJSON_AddBoolToObject(resp, "is_vrr", m->is_vrr_enabling);
 	cJSON_AddNumberToObject(resp, "x", m->m.x);
 	cJSON_AddNumberToObject(resp, "y", m->m.y);
 	cJSON_AddNumberToObject(resp, "width", m->m.width);
@@ -397,7 +400,7 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 		}
 
 		Arg arg = {0};
-		int32_t (*func)(const Arg *) = parse_func_name(
+		void (*func)(const Arg *) = parse_func_name(
 			token_count > 0 ? tokens[0] : "", &arg,
 			token_count > 1 ? tokens[1] : "", token_count > 2 ? tokens[2] : "",
 			token_count > 3 ? tokens[3] : "", token_count > 4 ? tokens[4] : "",
