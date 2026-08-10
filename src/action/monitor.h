@@ -6,7 +6,14 @@ bool mango_scene_output_commit(struct wlr_scene_output *scene_output,
 
 	bool frame_allow_tearing = check_tearing_frame_allow(m);
 
-	if (!wlr_scene_output_needs_frame(scene_output))
+	/* mode/scale/transform 等输出状态变化时必须提交，即使场景无帧
+	 * （needs_frame 只反映场景 damage），否则 wl_output 事件不会发送 */
+	bool state_changed =
+		state->committed &
+		(WLR_OUTPUT_STATE_MODE | WLR_OUTPUT_STATE_SCALE |
+		 WLR_OUTPUT_STATE_TRANSFORM | WLR_OUTPUT_STATE_ENABLED |
+		 WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED);
+	if (!state_changed && !wlr_scene_output_needs_frame(scene_output))
 		return true;
 
 	// build the state, attaching the scene's Buffer to it
@@ -42,7 +49,8 @@ bool mango_scene_output_commit(struct wlr_scene_output *scene_output,
 			wlr_output_state_init(&m->pending);
 		}
 	} else {
-		wlr_log(WLR_INFO, "Failed to commit output %s", m->wlr_output->name);
+		mango_error(true, WLR_INFO, "Failed to commit output %s",
+					m->wlr_output->name);
 		return false;
 	}
 
@@ -56,7 +64,7 @@ bool mango_output_commit(Monitor *m) {
 		wlr_output_state_finish(&m->pending);
 		wlr_output_state_init(&m->pending);
 	} else {
-		wlr_log(WLR_ERROR, "Failed to commit frame");
+		mango_error(true, WLR_ERROR, "Failed to commit frame");
 	}
 	return committed;
 }

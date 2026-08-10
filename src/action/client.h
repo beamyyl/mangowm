@@ -54,7 +54,7 @@ static void finish_exchange_arrange_and_focus(Client *c1, Client *c2,
 }
 
 void client_tile_resize(Client *c, struct wlr_box geo, int32_t interact) {
-	if (!ISFAKETILED(c))
+	if (!ISFAKETILED(c) || !c->mon)
 		return;
 
 	if (!c->mon->isoverview && !c->isfullscreen &&
@@ -107,7 +107,13 @@ void client_pending_force_kill(Client *c) {
 void client_add_jump_label_node(Client *c) {
 	c->jump_label_node =
 		mango_jump_label_node_create(c->scene, config.jumplabeldata);
-	wlr_scene_node_lower_to_bottom(&c->jump_label_node->scene_buffer->node);
+	if (!c->jump_label_node)
+		return;
+	/* overview 里 label 要显示在卡片树之上 */
+	if (c->ov_card_tree)
+		wlr_scene_node_raise_to_top(&c->jump_label_node->scene_buffer->node);
+	else
+		wlr_scene_node_lower_to_bottom(&c->jump_label_node->scene_buffer->node);
 	wlr_scene_node_set_enabled(&c->jump_label_node->scene_buffer->node, false);
 }
 
@@ -269,8 +275,9 @@ void client_set_group_config(Client *c) {
 
 	Client *cur = head;
 	while (cur) {
-		mango_jump_label_node_apply_config(cur->jump_label_node,
-										   &config.jumplabeldata);
+		if (cur->jump_label_node)
+			mango_jump_label_node_apply_config(cur->jump_label_node,
+											   &config.jumplabeldata);
 		wlr_scene_rect_set_color(cur->droparea, config.dropcolor);
 		wlr_scene_rect_set_color(cur->splitindicator[0], config.splitcolor);
 		wlr_scene_rect_set_color(cur->splitindicator[1], config.splitcolor);
@@ -306,4 +313,36 @@ void client_group_replace(Client *old, Client *new) {
 	} else {
 		new->isgroupfocusing = old->isgroupfocusing;
 	}
+}
+
+void mango_surface_frame_done(struct wlr_surface *surface, int sx, int sy,
+							  void *data) {
+	(void)sx;
+	(void)sy;
+	wlr_surface_send_frame_done(surface, data);
+}
+
+// 给被隐藏窗口的所有 surface（含 subsurface）喂 frame callback，
+// 让客户端在 overview 预览中继续渲染（解除帧回调节流导致的停画）。
+// 不能用 wlr_scene_node_for_each_buffer 遍历原 scene_surface 树：
+// 该树在拍完快照后被 disabled，scenefx 的 for_each_buffer 会直接跳过
+// disabled 节点（wlr_scene.c scene_node_for_each_scene_buffer），导致
+// 一个 surface 都喂不到——普通窗口就会因收不到 frame callback 而停画。
+void client_send_frame_done(Client *c, const struct timespec *now) {
+	struct wlr_surface *s = client_surface(c);
+	if (!s)
+		return;
+	wlr_surface_for_each_surface(s, mango_surface_frame_done, (void *)now);
+}
+
+bool client_force_render(Client *c) {
+	if (!c || !c->mon || c->iskilling || !client_surface(c)->mapped ||
+		c->scene->node.enabled)
+		return false;
+
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	client_send_frame_done(c, &now);
+	return true;
 }

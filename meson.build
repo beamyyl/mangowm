@@ -1,5 +1,5 @@
 project('mango', ['c'],
-  version : '0.15.4',
+  version : '0.15.6',
 )
 
 subdir('protocols')
@@ -95,6 +95,7 @@ endif
 
 executable('mango',
   'src/mango.c',
+  'src/common/log.c',
   'src/common/util.c',
   'src/draw/text-node.c',
 
@@ -137,13 +138,16 @@ wayland_scanner_private_code = generator(
 # use generator in mmsg target
 executable('mmsg',
   'mmsg/mmsg.c',
+  'src/common/log.c',
   dependencies: [
-    libwayland_client_dep
+    libwayland_client_dep,
+    wlroots_dep,
   ],
   install: true,
   c_args: [
     '-g',
     '-Wno-unused-function',
+    '-DWLR_USE_UNSTABLE',
   ],
 )
 

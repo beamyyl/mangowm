@@ -251,39 +251,6 @@ void scene_buffer_apply_effect(struct wlr_scene_buffer *buffer, int32_t sx,
 	wlr_scene_buffer_set_corner_radii(buffer, buffer_data->corner_location);
 }
 
-void scene_buffer_apply_overview_effect(struct wlr_scene_buffer *buffer,
-										int32_t sx, int32_t sy, void *data) {
-	BufferData *buffer_data = (BufferData *)data;
-
-	int32_t surface_width = 0, surface_height = 0;
-	bool is_subsurface = false;
-
-	struct wlr_scene_tree *parent_tree = buffer->node.parent;
-	SnapshotMetadata *meta = (SnapshotMetadata *)parent_tree->node.data;
-	if (parent_tree->node.data != NULL && meta->type == Snapshot) {
-		surface_width = meta->orig_width;
-		surface_height = meta->orig_height;
-		is_subsurface = meta->is_subsurface;
-	} else {
-		return;
-	}
-
-	surface_height = surface_height * buffer_data->height_scale;
-	surface_width = surface_width * buffer_data->width_scale;
-
-	if (is_subsurface && surface_width > 0 && surface_height > 0) {
-		wlr_scene_buffer_set_dest_size(buffer, surface_width, surface_height);
-	} else if (buffer_data->height > 0 && buffer_data->width > 0) {
-		wlr_scene_buffer_set_dest_size(buffer, buffer_data->width,
-									   buffer_data->height);
-	}
-
-	if (is_subsurface)
-		return;
-
-	wlr_scene_buffer_set_corner_radii(buffer, buffer_data->corner_location);
-}
-
 void buffer_set_effect(Client *c, BufferData data) {
 	if (!c || c->iskilling)
 		return;
@@ -302,12 +269,14 @@ void buffer_set_effect(Client *c, BufferData data) {
 	if (config.blur && !c->noblur)
 		wlr_scene_blur_set_corner_radii(c->blur, data.corner_location);
 
-	if (c->overview_scene_surface)
-		wlr_scene_node_for_each_buffer(
-			&c->scene_surface->node, scene_buffer_apply_overview_effect, &data);
-	else
-		wlr_scene_node_for_each_buffer(&c->scene_surface->node,
-									   scene_buffer_apply_effect, &data);
+	/* overview 卡片直接应用圆角 */
+	if (c->ov_card_tree) {
+		overview_card_set_corner_radii(c, data.corner_location);
+		return;
+	}
+
+	wlr_scene_node_for_each_buffer(&c->scene_surface->node,
+								   scene_buffer_apply_effect, &data);
 }
 
 void client_draw_shadow(Client *c, struct ivec2 offsets) {
@@ -943,6 +912,28 @@ void client_apply_clip(Client *c, float factor) {
 	if (c->iskilling || !client_surface(c)->mapped)
 		return;
 
+	/* overview 卡片模式：内容由独立卡片树显示，这里更新卡片位置/缩放，
+	 * 同时重绘装饰节点使其适配卡片几何 */
+	if (c->ov_card_tree) {
+		struct ivec2 offsets = compute_edge_offsets(c);
+
+		struct wlr_box clip_box;
+		struct ivec2 surface_clip_offset;
+		client_get_clip(c, &clip_box);
+		surface_clip_offset = clip_to_hide(c, &clip_box, offsets);
+
+		/* 装饰节点按卡片几何绘制 */
+		client_draw_border(c, offsets);
+		client_draw_shadow(c, offsets);
+		client_draw_groupbar(c, offsets);
+		client_draw_blur(c, surface_clip_offset);
+		client_draw_shield(c, surface_clip_offset);
+
+		overview_layout_card(c);
+		overview_card_set_corner_radii(c, set_client_corner_location(c));
+		return;
+	}
+
 	struct ivec2 offsets = compute_edge_offsets(c);
 
 	struct wlr_box clip_box;
@@ -979,7 +970,11 @@ void client_apply_clip(Client *c, float factor) {
 		if (!should_render_client_surface)
 			return;
 
-		if (!c->overview_scene_surface)
+		/* X11 用 source_box + dest_size 裁剪（buffer 物理尺寸 × scale，
+		 * clip 逻辑尺寸），走 wlr_scene clip 会把内容按物理尺寸放大 */
+		if (client_is_x11(c))
+			client_update_xwayland_clip(c, &clip_box);
+		else if (!c->overview_scene_surface)
 			wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node,
 											   &clip_box);
 
@@ -1013,6 +1008,12 @@ void client_apply_clip(Client *c, float factor) {
 	client_draw_groupbar(c, offsets);
 	client_draw_shield(c, surface_clip_offset);
 	client_draw_blur(c, surface_clip_offset);
+	/* 动画时同步 X11 根 surface 的 dest_size / 裁剪（source_box + dest_size）
+	 */
+	if (client_is_x11(c))
+		client_update_xwayland_clip(c, &clip_box);
+	else
+		client_update_xwayland_dest_size(c);
 
 	if (clip_box.width <= 0 || clip_box.height <= 0) {
 		should_render_client_surface = false;
@@ -1025,7 +1026,9 @@ void client_apply_clip(Client *c, float factor) {
 	if (!should_render_client_surface)
 		return;
 
-	if (!c->overview_scene_surface)
+	/* X11 的裁剪已由上面的 client_update_xwayland_clip 用 source_box 完成；
+	 * wlr_scene clip 会把 buffer 按物理尺寸放大，不能用于 X11 */
+	if (!c->overview_scene_surface && !client_is_x11(c))
 		wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip_box);
 
 	int32_t actual_surface_width =
@@ -1197,12 +1200,21 @@ void init_fadeout_client(Client *c) {
 
 	wlr_scene_node_set_enabled(&c->scene->node, true);
 	client_set_border_color(c, config.bordercolor);
-	if (c->overview_scene_surface) {
-		wlr_scene_node_destroy(&c->overview_scene_surface->node);
+	if (c->ov_card_tree) {
+		/* overview 中关闭：fadeout 快照基于已缩放的卡片树。
+		 * 快照按节点坐标累加，卡片树坐标只是相对 (bw,bw)，直接快照会落在
+		 * 层原点附近；先临时把卡片树摆到卡片绝对屏幕坐标再快照 */
+		int32_t abs_x = c->animation.current.x + (int32_t)c->bw;
+		int32_t abs_y = c->animation.current.y + (int32_t)c->bw;
+		wlr_scene_node_set_position(&c->ov_card_tree->node, abs_x, abs_y);
+		fadeout_client->scene =
+			wlr_scene_tree_snapshot(&c->ov_card_tree->node, layers[LyrFadeOut]);
+		overview_destroy_card(c);
 		c->overview_scene_surface = NULL;
+	} else {
+		fadeout_client->scene =
+			wlr_scene_tree_snapshot(&c->scene->node, layers[LyrFadeOut]);
 	}
-	fadeout_client->scene =
-		wlr_scene_tree_snapshot(&c->scene->node, layers[LyrFadeOut]);
 	wlr_scene_node_set_enabled(&c->scene->node, false);
 
 	if (!fadeout_client->scene) {
@@ -1285,6 +1297,10 @@ void client_set_pending_state(Client *c) {
 		c->animation.should_animate = false;
 	else if (config.animations && c->animation.tagining)
 		c->animation.should_animate = true;
+	else if (config.animations && c->animation.action == OVERVIEW &&
+			 c->animation.overview_enter_anim_set)
+		/* overview 进入动画：设置放大后强制启动，预排阶段不强制，避免抖动 */
+		c->animation.should_animate = true;
 	else if (c == grabc || (!c->is_pending_open_animation &&
 							wlr_box_equal(&c->current, &c->pending)))
 		c->animation.should_animate = false;
@@ -1297,11 +1313,6 @@ void client_set_pending_state(Client *c) {
 		  strcmp(config.animation_type_open, "none") == 0)) &&
 		c->animation.action == OPEN)
 		c->animation.duration = 0;
-
-	if (c->istagswitching) {
-		c->animation.duration = 0;
-		c->istagswitching = 0;
-	}
 
 	if (start_drag_window) {
 		c->animation.should_animate = false;
@@ -1317,7 +1328,12 @@ void client_set_pending_state(Client *c) {
 	c->dirty = true;
 }
 
-void resize(Client *c, struct wlr_box geo, int32_t interact) {
+typedef struct ResizeOpts {
+	bool interact;			 // 交互式 resize（鼠标拖动调整）
+	bool skip_ov_enter_anim; // 预排阶段：跳过 overview 进入放大
+} ResizeOpts;
+
+void resize_apply(Client *c, struct wlr_box geo, ResizeOpts opts) {
 	if (!c || !c->mon || !client_surface(c)->mapped)
 		return;
 
@@ -1327,8 +1343,9 @@ void resize(Client *c, struct wlr_box geo, int32_t interact) {
 	c->need_output_flush = true;
 	c->dirty = true;
 
-	struct wlr_box *bbox =
-		(interact || c->isfloating || c->isfullscreen) ? &sgeom : &c->mon->w;
+	struct wlr_box *bbox = (opts.interact || c->isfloating || c->isfullscreen)
+							   ? &sgeom
+							   : &c->mon->w;
 	struct wlr_box clip;
 
 	if (is_scroller_layout(c->mon) && (!c->isfloating || c == grabc)) {
@@ -1385,7 +1402,7 @@ void resize(Client *c, struct wlr_box geo, int32_t interact) {
 		c->fake_no_border = true;
 	}
 
-	if (!c->mon->isoverview || !config.ov_no_resize)
+	if (!c->mon->isoverview)
 		c->configure_serial = client_set_size(c, c->geom.width - 2 * c->bw,
 											  c->geom.height - 2 * c->bw);
 
@@ -1410,7 +1427,10 @@ void resize(Client *c, struct wlr_box geo, int32_t interact) {
 		client_draw_shield(c, surface_clip_offset);
 		client_draw_blur(c, surface_clip_offset);
 
-		wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+		if (client_is_x11(c))
+			client_update_xwayland_clip(c, &clip);
+		else
+			wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 		return;
 	}
 
@@ -1430,15 +1450,30 @@ void resize(Client *c, struct wlr_box geo, int32_t interact) {
 	if (c->scratchpad_switching_mon && c->isfloating)
 		c->animainit_geom = c->geom;
 
-	if (config.animations && config.ov_no_resize && c->mon->isoverview &&
-		c != c->mon->sel && c->animation.action == OVERVIEW)
-		set_overview_enter_animation(c);
+	if (!opts.skip_ov_enter_anim) {
+		/* 清除进入动画标志（含焦点窗口），避免切换焦点时重复放大 */
+		if (config.animations && c->mon->isoverview && c->animation.overining &&
+			!c->animation.overview_enter_anim_set)
+			c->animation.overining = false;
 
-	if (!config.animations && config.ov_no_resize && c->mon->isoverview)
-		c->animainit_geom = c->geom;
+		/* 设置进入放大动画：ov_tab 所有窗口，其余除 sel 外 */
+		bool is_ov_tab = config.ov_tab_mode && !c->mon->is_jump_mode &&
+						 !c->mon->ov_normal_mode;
+		if (config.animations && c->mon->isoverview &&
+			(is_ov_tab || c != c->mon->sel) &&
+			c->animation.action == OVERVIEW &&
+			!c->animation.overview_enter_anim_set) {
+			c->animation.overview_enter_anim_set = true;
+			set_overview_enter_animation(c);
+		}
+	}
 
 	client_set_pending_state(c);
 	setborder_color(c);
+}
+
+void resize(Client *c, struct wlr_box geo, int32_t interact) {
+	resize_apply(c, geo, (ResizeOpts){.interact = interact});
 }
 
 bool client_draw_fadeout_frame(Client *c) {
@@ -1592,12 +1627,19 @@ bool client_apply_focus_opacity(Client *c) {
 bool client_draw_frame(Client *c) {
 
 	bool need_next_tick = false;
+	bool force_render = false;
 
 	if (!c || !client_surface(c)->mapped)
 		return false;
 
+	// always render when scene is disabled
+	if (c->force_render && !c->scene->node.enabled) {
+		force_render = client_force_render(c);
+		need_next_tick = force_render || need_next_tick;
+	}
+
 	if (!c->need_output_flush)
-		return client_apply_focus_opacity(c);
+		return client_apply_focus_opacity(c) || need_next_tick;
 
 	if (config.animations && c->animation.running) {
 		need_next_tick = true;

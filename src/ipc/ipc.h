@@ -73,7 +73,7 @@ static const char *ipc_get_layout_str(void) {
 
 static cJSON *tags_mask_to_array(uint32_t tagmask) {
 	cJSON *arr = cJSON_CreateArray();
-	for (int i = 0; i < LENGTH(tags); i++)
+	for (int i = 0; i < config.tag_num; i++)
 		if (tagmask & (1 << i))
 			cJSON_AddItemToArray(arr, cJSON_CreateNumber(i + 1));
 	return arr;
@@ -82,19 +82,23 @@ static cJSON *tags_mask_to_array(uint32_t tagmask) {
 static cJSON *build_tags_json(Monitor *m) {
 	cJSON *tags_array = cJSON_CreateArray();
 	Client *c = NULL;
-	for (int tag = 1; tag <= LENGTH(tags); tag++) {
+
+	for (int tag = 1; tag <= config.tag_num; tag++) {
 		int numclients = 0;
+		uint32_t client_status = 0;
 		bool is_active = false, is_urgent = false;
 		uint32_t tagmask = 1 << (tag - 1);
 		if (tagmask & m->tagset[m->seltags])
 			is_active = true;
 		wl_list_for_each(c, &clients, link) {
-			if (c->mon != m)
+			client_status = get_tag_status(tag, m);
+
+			if (!client_status)
 				continue;
-			if (!(c->tags & tagmask & TAGMASK))
-				continue;
-			if (c->isurgent)
+
+			if (client_status == 2)
 				is_urgent = true;
+
 			numclients++;
 		}
 		cJSON *tag_obj = cJSON_CreateObject();
@@ -132,7 +136,7 @@ static cJSON *monitor_active_tags(Monitor *m) {
 		return arr;
 	}
 	tagset = m->tagset[m->seltags];
-	for (int i = 0; i < LENGTH(tags); i++)
+	for (int i = 0; i < config.tag_num; i++)
 		if (tagset & (1 << i))
 			cJSON_AddItemToArray(arr, cJSON_CreateNumber(i + 1));
 	return arr;
@@ -309,7 +313,7 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 		}
 		int tag_idx = ext_tag_idx - 1;
 		Monitor *m = monitor_by_name(mon_name);
-		if (!m || tag_idx < 0 || tag_idx >= LENGTH(tags)) {
+		if (!m || tag_idx < 0 || tag_idx >= config.tag_num) {
 			send_static_json(client_fd,
 							 "{\"error\":\"invalid monitor or tag index\"}\n");
 			return;
@@ -658,7 +662,7 @@ static int ipc_handle_client_data(int fd, uint32_t mask, void *data) {
 			size_t new_cap = client->buf_cap ? client->buf_cap * 2 : 8192;
 			char *new_buf = realloc(client->buf, new_cap);
 			if (!new_buf) {
-				wlr_log(WLR_ERROR, "IPC: out of memory");
+				mango_error(true, WLR_ERROR, "IPC: out of memory");
 				goto cleanup;
 			}
 			client->buf = new_buf;
@@ -1031,20 +1035,26 @@ void ipc_init(struct wl_event_loop *event_loop) {
 	// 设置 FD_CLOEXEC
 	int flags = fcntl(ipc_sock_fd, F_GETFD, 0);
 	if (flags == -1 || fcntl(ipc_sock_fd, F_SETFD, flags | FD_CLOEXEC) == -1) {
-		wlr_log(WLR_ERROR, "failed to set FD_CLOEXEC on IPC socket");
+		mango_error(true, WLR_ERROR, "failed to set FD_CLOEXEC on IPC socket");
 		close(ipc_sock_fd);
 		return;
 	}
 	// 设置 O_NONBLOCK
 	flags = fcntl(ipc_sock_fd, F_GETFL, 0);
 	if (flags == -1 || fcntl(ipc_sock_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-		wlr_log(WLR_ERROR, "failed to set O_NONBLOCK on IPC socket");
+		mango_error(true, WLR_ERROR, "failed to set O_NONBLOCK on IPC socket");
 		close(ipc_sock_fd);
 		return;
 	}
 
 	struct sockaddr_un addr = {.sun_family = AF_UNIX};
-	strncpy(addr.sun_path, ipc_socket_path, sizeof(addr.sun_path) - 1);
+	int len =
+		snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", ipc_socket_path);
+	if (len < 0 || (size_t)len >= sizeof(addr.sun_path)) {
+		wlr_log(WLR_ERROR, "IPC socket path too long for sun_path");
+		close(ipc_sock_fd);
+		return;
+	}
 
 	unlink(ipc_socket_path);
 	if (bind(ipc_sock_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
